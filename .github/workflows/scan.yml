@@ -1,0 +1,91 @@
+name: Crypto OSINT Scan
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rescan even if recent'
+        required: false
+        default: 'false'
+      target:
+        description: 'Token/contract to scan (leave empty for default watchlist)'
+        required: false
+        default: ''
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run OSINT scan
+        run: |
+          mkdir -p output
+          if [ -n "${{ github.event.inputs.target }}" ]; then
+            echo "Scanning target: ${{ github.event.inputs.target }}"
+            python -c "
+import sys
+sys.path.append('src')
+from src.tracker import CryptoOSINTTracker
+tracker = CryptoOSINTTracker()
+report = tracker.scan_target('${{ github.event.inputs.target }}')
+tracker.save_report(report, 'output/report.json')
+print(f'Scan completed for ${{ github.event.inputs.target }}')
+            "
+          else
+            echo "Scanning default watchlist"
+            python -c "
+import sys
+sys.path.append('src')
+from src.tracker import CryptoOSINTTracker
+tracker = CryptoOSINTTracker()
+reports = tracker.scan_watchlist()
+for i, report in enumerate(reports):
+    tracker.save_report(report, f'output/report_{i}.json')
+print(f'Scan completed: {len(reports)} reports generated')
+            "
+          fi
+
+      - name: Validate output
+        run: |
+          python -c "
+          import json, os, glob
+          reports = glob.glob('output/report*.json')
+          if len(reports) == 0:
+              print('ERROR: No reports generated')
+              exit(1)
+          else:
+              print(f'OK: Generated {len(reports)} reports')
+              # Quick validation of first report
+              with open(reports[0], 'r') as f:
+                  data = json.load(f)
+              if 'risk_rating' not in data:
+                  print('WARNING: Report missing risk_rating field')
+              else:
+                  print(f'Report risk rating: {data.get(\"risk_rating\", \"unknown\")}')
+          "
+
+      - name: Commit and push results
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add output/
+            git commit -m "Update OSINT reports: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" || echo "No changes to commit"
+            git push
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
